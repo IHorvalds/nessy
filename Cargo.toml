@@ -1,0 +1,7 @@
+[package]
+name = "nessy"
+version = "0.1.0"
+authors = ["IHorvalds"]
+edition = "2024"
+
+[dependencies]
