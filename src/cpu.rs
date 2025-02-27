@@ -2,10 +2,12 @@ use std::collections::HashMap;
 
 use crate::opscodes::{OPCODES_MAP, OpCode};
 
+#[derive(Debug, PartialEq)]
 enum Register {
     A,
     X,
     Y,
+    Stack,
 }
 
 #[derive(Debug)]
@@ -67,7 +69,7 @@ impl CPU {
             register_a: 0,
             register_x: 0,
             register_y: 0,
-            register_stack: 0,
+            register_stack: 0xFF,
             status: 0,
             program_counter: 0,
             memory: [0u8; 0xFFFF],
@@ -77,6 +79,7 @@ impl CPU {
     pub fn reset(&mut self) {
         self.register_a = 0;
         self.register_x = 0;
+        self.register_stack = 0xFF;
         self.status = 0;
         self.program_counter = self.mem_read_u16(0xFFFC);
     }
@@ -126,9 +129,17 @@ impl CPU {
                 // STY
                 0x84 | 0x94 | 0x8C => self.store_reg(&opcode.addressing_mode, self.register_y),
                 // TAX
-                0xAA => self.transfer_accumulator(&Register::X),
+                0xAA => self.transfer_accumulator(&Register::A, &Register::X),
                 // TAY
-                0xA8 => self.transfer_accumulator(&Register::Y),
+                0xA8 => self.transfer_accumulator(&Register::A, &Register::Y),
+                // TSX
+                0xBA => self.transfer_accumulator(&Register::Stack, &Register::A),
+                // TXA
+                0x8A => self.transfer_accumulator(&Register::X, &Register::A),
+                // TXS
+                0x9A => self.transfer_accumulator(&Register::X, &Register::Stack),
+                // TYA
+                0x98 => self.transfer_accumulator(&Register::Y, &Register::A),
 
                 // INX
                 0xE8 => self.inx(),
@@ -141,7 +152,11 @@ impl CPU {
                 0x4C | 0x6C => self.jmp(&opcode.addressing_mode),
                 // RTS
                 0x60 => self.rts(),
+                // JSR
+                0x20 => self.jsr(),
 
+                // NOP
+                0xEA => continue,
                 // BRK
                 0x00 => return,
                 _ => todo!(),
@@ -161,6 +176,7 @@ impl CPU {
             Register::A => &mut self.register_a,
             Register::X => &mut self.register_x,
             Register::Y => &mut self.register_y,
+            _ => panic!("Register {:?} cannot be loaded with LD*", reg),
         }) = val;
 
         self.update_zero_and_negative_flags(val);
@@ -171,14 +187,23 @@ impl CPU {
         self.mem_write(addr, reg);
     }
 
-    fn transfer_accumulator(&mut self, reg: &Register) {
-        let r = match reg {
-            Register::X => &mut self.register_x,
-            Register::Y => &mut self.register_x,
-            _ => panic!("Can only transfers registers X and Y"),
+    fn transfer_accumulator(&mut self, src: &Register, dest: &Register) {
+        let val = match src {
+            Register::A => self.register_a,
+            Register::X => self.register_x,
+            Register::Y => self.register_y,
+            Register::Stack => self.register_stack,
         };
-        *r = self.register_a;
-        self.update_zero_and_negative_flags(self.register_a);
+
+        let r = match dest {
+            Register::A => &mut self.register_a,
+            Register::X => &mut self.register_x,
+            Register::Y => &mut self.register_y,
+            Register::Stack => &mut self.register_stack,
+        };
+
+        *r = val;
+        self.update_zero_and_negative_flags(val);
     }
 
     fn update_zero_and_negative_flags(&mut self, result: u8) {
@@ -220,8 +245,22 @@ impl CPU {
     }
 
     fn rts(&mut self) {
-        self.program_counter = ...;
-        self.program_counter.wrapping_sub(1);
+        let sp = 0x100 | self.register_stack as u16;
+        self.register_stack = self.register_stack.wrapping_add(1);
+
+        let addr = self.mem_read_u16(sp);
+        self.program_counter = addr.wrapping_sub(1);
+    }
+
+    fn jsr(&mut self) {
+        let addr = self.get_operand_address(&AddressingMode::Absolute);
+
+        // store this on the stack
+        let sp = 0x100 | self.register_stack as u16;
+        self.register_stack = self.register_stack.wrapping_sub(1);
+        self.mem_write_u16(sp, self.program_counter.wrapping_sub(1));
+
+        self.program_counter = addr;
     }
 
     fn get_operand_address(&mut self, mode: &AddressingMode) -> u16 {
