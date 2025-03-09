@@ -128,6 +128,20 @@ impl CPU {
                 .expect(&format!("OpCode {:x} is not known or implemented", code));
 
             match code {
+                // CLV
+                0xB8 => self.status.remove(CPUFlags::OVERFLOW),
+                // CLI
+                0x58 => self.status.remove(CPUFlags::INTRERRUPT_DISABLE),
+                // CLC
+                0x18 => self.status.remove(CPUFlags::CARRY),
+                // CLD
+                0xD8 => self.status.remove(CPUFlags::DEC_MODE),
+                // SEC
+                0x38 => self.status.insert(CPUFlags::CARRY),
+                // SED
+                0xF8 => self.status.insert(CPUFlags::DEC_MODE),
+                // SEI
+                0x78 => self.status.insert(CPUFlags::INTRERRUPT_DISABLE),
                 // LDA
                 0xA9 | 0xA5 | 0xAD | 0xB5 | 0xBD | 0xB9 | 0xA1 | 0xB1 => {
                     self.load_reg(&opcode.addressing_mode, &Register::A)
@@ -182,6 +196,14 @@ impl CPU {
                 // JSR
                 0x20 => self.jsr(),
 
+                // RTI
+                0x40 => {
+                    self.status = CPUFlags::from_bits_truncate(self.pop_stack());
+                    self.status.remove(CPUFlags::BRK_CMD);
+
+                    self.program_counter = self.pop_stack_16();
+                }
+
                 // LSR
                 0x4A | 0x46 | 0x56 | 0x4E | 0x5E => self.lsr(&opcode.addressing_mode),
 
@@ -221,6 +243,15 @@ impl CPU {
                     self.update_carry_flag(self.register_a);
                 }
 
+                // ADC
+                0x65 | 0x69 | 0x75 | 0x6D | 0x7D | 0x79 | 0x61 | 0x71 => {
+                    self.adc(&opcode.addressing_mode);
+                }
+                // SBC
+                0xE9 | 0xE5 | 0xF5 | 0xED | 0xFD | 0xF9 | 0xE1 | 0xF1 => {
+                    self.sbc(&opcode.addressing_mode)
+                }
+
                 // CMP
                 0xC9 | 0xC5 | 0xD5 | 0xCD | 0xDD | 0xD9 | 0xC1 | 0xD1 => {
                     self.cmp(&opcode.addressing_mode, &Register::A)
@@ -229,6 +260,26 @@ impl CPU {
                 0xE0 | 0xE4 | 0xEC => self.cmp(&opcode.addressing_mode, &Register::X),
                 // CPY
                 0xC0 | 0xC4 | 0xCC => self.cmp(&opcode.addressing_mode, &Register::Y),
+
+                // BCC
+                0x90 => self.branch(!self.status.contains(CPUFlags::CARRY)),
+                // BCS
+                0xB0 => self.branch(self.status.contains(CPUFlags::CARRY)),
+                // BEQ
+                0xF0 => self.branch(self.status.contains(CPUFlags::ZERO)),
+                // BNE
+                0xD0 => self.branch(!self.status.contains(CPUFlags::ZERO)),
+                // BPL
+                0x10 => self.branch(!self.status.contains(CPUFlags::NEGATIVE)),
+                // BMI
+                0x30 => self.branch(self.status.contains(CPUFlags::NEGATIVE)),
+                // BVC
+                0x50 => self.branch(!self.status.contains(CPUFlags::OVERFLOW)),
+                // BVS
+                0x70 => self.branch(self.status.contains(CPUFlags::OVERFLOW)),
+
+                // BIT
+                0x24 | 0x2c => self.bit(&opcode.addressing_mode),
 
                 // NOP
                 0xEA => continue,
@@ -315,6 +366,12 @@ impl CPU {
             (hi << 8) | lo
         } else {
             self.get_operand_address(mode)
+        }
+    }
+
+    fn branch(&mut self, cond: bool) {
+        if cond {
+            self.get_operand_address(&AddressingMode::Relative);
         }
     }
 
@@ -441,6 +498,62 @@ impl CPU {
         self.update_zero_and_negative_flags(val);
     }
 
+    fn adc(&mut self, mode: &AddressingMode) {
+        let addr = self.get_operand_address(mode);
+        let val = self.mem_read(addr);
+
+        self.carry_add_to_reg_a(val);
+    }
+
+    fn bit(&mut self, mode: &AddressingMode) {
+        let addr = self.get_operand_address(mode);
+        let val = self.mem_read(addr);
+
+        if self.register_a & val == 0 {
+            self.status.insert(CPUFlags::ZERO);
+        }
+
+        if val >> 7 == 1 {
+            self.status.insert(CPUFlags::NEGATIVE);
+        } else {
+            self.status.remove(CPUFlags::NEGATIVE);
+        }
+
+        if (val >> 6) & 0b1 == 1 {
+            self.status.insert(CPUFlags::OVERFLOW);
+        } else {
+            self.status.remove(CPUFlags::OVERFLOW);
+        }
+    }
+
+    fn carry_add_to_reg_a(&mut self, val: u8) {
+        let sum =
+            self.register_a as u16 + val as u16 + (self.status.contains(CPUFlags::CARRY) as u16);
+
+        if sum > 0xff {
+            self.status.insert(CPUFlags::CARRY);
+        } else {
+            self.status.remove(CPUFlags::CARRY);
+        }
+
+        let result = sum as u8;
+        if (val ^ result) & (result ^ self.register_a) & 0b1000_000 != 0 {
+            self.status.insert(CPUFlags::OVERFLOW);
+        } else {
+            self.status.remove(CPUFlags::OVERFLOW);
+        }
+
+        self.register_a = result;
+
+        self.update_zero_and_negative_flags(result);
+    }
+
+    fn sbc(&mut self, mode: &AddressingMode) {
+        let addr = self.get_operand_address(mode);
+        let val = self.mem_read(addr);
+        self.carry_add_to_reg_a((val as i8).wrapping_neg().wrapping_sub(1) as u8);
+    }
+
     fn eor(&mut self, mode: &AddressingMode) {
         let addr = self.get_operand_address(mode);
         let result = self.register_a ^ self.mem_read(addr);
@@ -540,7 +653,7 @@ impl CPU {
             }
             AddressingMode::Indirect_X => {
                 let base = self.mem_read(self.program_counter);
-                let ptr = (base as u8).wrapping_add(self.register_x);
+                let ptr = base.wrapping_add(self.register_x);
                 let lo = self.mem_read(ptr as u16) as u16;
                 let hi = self.mem_read(ptr.wrapping_add(1) as u16) as u16;
                 (hi << 8) | lo
@@ -548,14 +661,17 @@ impl CPU {
             AddressingMode::Indirect_Y => {
                 let base = self.mem_read(self.program_counter);
                 let lo = self.mem_read(base as u16) as u16;
-                let hi = self.mem_read((base as u8).wrapping_add(1) as u16) as u16;
+                let hi = self.mem_read(base.wrapping_add(1) as u16) as u16;
                 let deref_base = (hi << 8) | lo;
                 let deref = deref_base.wrapping_add(self.register_y as u16);
                 deref
             }
             AddressingMode::Relative => {
                 let base = self.mem_read(self.program_counter) as i8;
-                self.program_counter = self.program_counter.wrapping_add_signed(base.into());
+                self.program_counter = self
+                    .program_counter
+                    .wrapping_add(1)
+                    .wrapping_add_signed(base.into());
                 self.program_counter
             }
             AddressingMode::Accumulator => panic!(
