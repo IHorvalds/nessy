@@ -57,7 +57,7 @@ pub struct CPU {
     memory: [u8; 0xFFFF],
 }
 
-trait Mem {
+pub trait Mem {
     fn mem_read(&self, addr: u16) -> u8;
     fn mem_write(&mut self, addr: u16, data: u8);
 
@@ -105,8 +105,9 @@ impl CPU {
     }
 
     pub fn load(&mut self, program: Vec<u8>) {
-        self.memory[0x8000..(0x8000 + program.len())].copy_from_slice(&program[..]);
-        self.mem_write_u16(0xFFFC, 0x8000);
+        let start = 0x0600;
+        self.memory[start..(start + program.len())].copy_from_slice(&program[..]);
+        self.mem_write_u16(0xFFFC, start as u16);
     }
 
     pub fn load_and_run(&mut self, program: Vec<u8>) {
@@ -115,7 +116,10 @@ impl CPU {
         self.run();
     }
 
-    pub fn run(&mut self) {
+    pub fn run_with_callback<F>(&mut self, mut callback: F)
+    where
+        F: FnMut(&mut CPU),
+    {
         let ref opcodes: HashMap<u8, &'static OpCode> = *OPCODES_MAP;
 
         loop {
@@ -171,7 +175,10 @@ impl CPU {
                 // TXA
                 0x8A => self.transfer_accumulator(&Register::X, &Register::A),
                 // TXS
-                0x9A => self.transfer_accumulator(&Register::X, &Register::Stack),
+                0x9A => {
+                    // WHY IS THIS SPECIAL???? WHYY????
+                    self.register_stack = self.register_x;
+                }
                 // TYA
                 0x98 => self.transfer_accumulator(&Register::Y, &Register::A),
 
@@ -232,15 +239,22 @@ impl CPU {
                 }
 
                 // PHP
-                0x08 => self.push_stack(self.status.bits()),
+                0x08 => {
+                    let mut flags = CPUFlags::from_bits_truncate(self.status.bits());
+                    flags.insert(CPUFlags::BRK_CMD);
+                    self.push_stack(flags.bits());
+                }
                 // PHA
                 0x48 => self.push_stack(self.register_a),
                 // PLP
-                0x28 => self.status = CPUFlags::from_bits_retain(self.pop_stack()),
+                0x28 => {
+                    self.status = CPUFlags::from_bits_retain(self.pop_stack());
+                    self.status.remove(CPUFlags::BRK_CMD);
+                }
                 // PLA
                 0x68 => {
                     self.register_a = self.pop_stack();
-                    self.update_carry_flag(self.register_a);
+                    self.update_zero_and_negative_flags(self.register_a);
                 }
 
                 // ADC
@@ -281,17 +295,23 @@ impl CPU {
                 // BIT
                 0x24 | 0x2c => self.bit(&opcode.addressing_mode),
 
-                // NOP
-                0xEA => continue,
+                // NOP (0xea==234)
+                0xEA => {}
                 // BRK
                 0x00 => return,
-                _ => todo!(),
+                _ => todo!("Unknown thing"),
             }
 
             if program_counter_state == self.program_counter {
                 self.program_counter += (opcode.instruction_len - 1) as u16;
             }
+
+            callback(self);
         }
+    }
+
+    pub fn run(&mut self) {
+        self.run_with_callback(|_| {});
     }
 
     fn load_reg(&mut self, mode: &AddressingMode, reg: &Register) {
@@ -340,6 +360,11 @@ impl CPU {
         };
     }
 
+    fn set_register_a(&mut self, val: u8) {
+        self.register_a = val;
+        self.update_zero_and_negative_flags(self.register_a);
+    }
+
     fn update_zero_and_negative_flags(&mut self, result: u8) {
         if result == 0 {
             self.status.insert(CPUFlags::ZERO);
@@ -371,19 +396,18 @@ impl CPU {
 
     fn branch(&mut self, cond: bool) {
         if cond {
-            self.get_operand_address(&AddressingMode::Relative);
+            let addr = self.get_operand_address(&AddressingMode::Relative);
+            self.program_counter = addr;
         }
     }
 
     fn rts(&mut self) {
-        let addr = self.pop_stack_16();
-        self.program_counter = addr;
+        self.program_counter = self.pop_stack_16() + 1;
     }
 
     fn jsr(&mut self) {
-        let addr = self.get_operand_address(&AddressingMode::Absolute);
-        self.push_stack_16(self.program_counter.wrapping_add(2));
-        self.program_counter = addr;
+        self.push_stack_16(self.program_counter.wrapping_add(1));
+        self.program_counter = self.get_operand_address(&AddressingMode::Absolute);
     }
 
     fn lsr(&mut self, mode: &AddressingMode) {
@@ -403,7 +427,6 @@ impl CPU {
         };
 
         self.update_carry_flag(val);
-
         self.update_zero_and_negative_flags(result);
     }
 
@@ -458,7 +481,6 @@ impl CPU {
         };
 
         self.update_carry_flag(val >> 7);
-
         self.update_zero_and_negative_flags(result);
     }
 
@@ -511,6 +533,8 @@ impl CPU {
 
         if self.register_a & val == 0 {
             self.status.insert(CPUFlags::ZERO);
+        } else {
+            self.status.remove(CPUFlags::ZERO);
         }
 
         if val >> 7 == 1 {
@@ -527,8 +551,13 @@ impl CPU {
     }
 
     fn carry_add_to_reg_a(&mut self, val: u8) {
-        let sum =
-            self.register_a as u16 + val as u16 + (self.status.contains(CPUFlags::CARRY) as u16);
+        let sum = self.register_a as u16
+            + val as u16
+            + (if self.status.contains(CPUFlags::CARRY) {
+                1
+            } else {
+                0
+            }) as u16;
 
         if sum > 0xff {
             self.status.insert(CPUFlags::CARRY);
@@ -537,15 +566,13 @@ impl CPU {
         }
 
         let result = sum as u8;
-        if (val ^ result) & (result ^ self.register_a) & 0b1000_000 != 0 {
+        if (val ^ result) & (result ^ self.register_a) & 0x80 != 0 {
             self.status.insert(CPUFlags::OVERFLOW);
         } else {
             self.status.remove(CPUFlags::OVERFLOW);
         }
 
-        self.register_a = result;
-
-        self.update_zero_and_negative_flags(result);
+        self.set_register_a(result);
     }
 
     fn sbc(&mut self, mode: &AddressingMode) {
@@ -557,21 +584,19 @@ impl CPU {
     fn eor(&mut self, mode: &AddressingMode) {
         let addr = self.get_operand_address(mode);
         let result = self.register_a ^ self.mem_read(addr);
-        self.update_zero_and_negative_flags(result);
+        self.set_register_a(result);
     }
 
     fn ora(&mut self, mode: &AddressingMode) {
         let addr = self.get_operand_address(mode);
         let result = self.register_a | self.mem_read(addr);
-        self.mem_write(addr, result);
-        self.update_zero_and_negative_flags(result);
+        self.set_register_a(result);
     }
 
     fn and(&mut self, mode: &AddressingMode) {
         let addr = self.get_operand_address(mode);
         let result = self.register_a & self.mem_read(addr);
-        self.mem_write(addr, result);
-        self.update_zero_and_negative_flags(result);
+        self.set_register_a(result);
     }
 
     fn cmp(&mut self, mode: &AddressingMode, reg: &Register) {
@@ -668,11 +693,11 @@ impl CPU {
             }
             AddressingMode::Relative => {
                 let base = self.mem_read(self.program_counter) as i8;
-                self.program_counter = self
+                let jump = self
                     .program_counter
                     .wrapping_add(1)
                     .wrapping_add_signed(base.into());
-                self.program_counter
+                jump
             }
             AddressingMode::Accumulator => panic!(
                 "Mode {:?} does not read an operand from memory, therefore no address can be specified",
@@ -708,6 +733,16 @@ mod test {
         let mut cpu = CPU::new();
         cpu.load_and_run(vec![0xa9, 0xff, 0x00]);
         assert!(cpu.status.contains(CPUFlags::NEGATIVE));
+    }
+
+    #[test]
+    fn test_lda_from_memory() {
+        let mut cpu = CPU::new();
+        cpu.mem_write(0x10, 0x55);
+
+        cpu.load_and_run(vec![0xa5, 0x10, 0x00]);
+
+        assert_eq!(cpu.register_a, 0x55);
     }
 
     #[test]
@@ -779,11 +814,11 @@ mod test {
         // stx $abcd
         // rts
         cpu.load_and_run(vec![
-            0xa9, 0x12, 0x20, 0x09, 0x80, 0xad, 0xcd, 0xab, 0x00, 0xa2, 0x34, 0x8e, 0xcd, 0xab,
+            0xa9, 0x12, 0x20, 0x09, 0x06, 0xad, 0xcd, 0xab, 0x00, 0xa2, 0x34, 0x8e, 0xcd, 0xab,
             0x60,
         ]);
 
-        assert_eq!(cpu.program_counter, 0x8009);
+        assert_eq!(cpu.program_counter, 0x0609);
         assert_eq!(cpu.register_stack, 0xff);
         assert_eq!(cpu.register_a, 0x34);
         assert_eq!(cpu.register_x, 0x34);
