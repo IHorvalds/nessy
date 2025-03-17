@@ -1,8 +1,11 @@
+mod bus;
+mod cartridge;
 mod cpu;
-pub mod opscodes;
+mod opscodes;
 mod snake;
 
 use crate::cpu::{CPU, Mem};
+use cartridge::Rom;
 use rand::Rng;
 use sdl2::EventPump;
 use sdl2::event::Event;
@@ -91,9 +94,12 @@ fn main() {
     let mut screen_state = [0u8; 32 * 32 * 3];
     let mut rng = rand::thread_rng();
 
+    // load the game
+    let bytes: Vec<u8> = std::fs::read("snake.nes").unwrap();
+    let rom = Rom::new(&bytes).unwrap();
+
     // Create the CPU, load the game, run(update the screen).
-    let mut cpu = CPU::new();
-    cpu.load(snake::GAME_CODE.clone());
+    let mut cpu = CPU::new_with_rom(rom);
     cpu.reset();
     cpu.run_with_callback(move |cpu| {
         handle_user_input(cpu, &mut evt_pump);

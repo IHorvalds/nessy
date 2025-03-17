@@ -1,3 +1,5 @@
+use crate::bus::Bus;
+use crate::cartridge::Rom;
 use crate::opscodes::{OPCODES_MAP, OpCode};
 use bitflags::bitflags;
 use std::collections::HashMap;
@@ -54,7 +56,7 @@ pub struct CPU {
     pub register_x: u8,
     pub register_y: u8,
     pub register_stack: u8,
-    memory: [u8; 0xFFFF],
+    pub bus: Bus,
 }
 
 pub trait Mem {
@@ -75,24 +77,36 @@ pub trait Mem {
 
 impl Mem for CPU {
     fn mem_read(&self, addr: u16) -> u8 {
-        self.memory[addr as usize]
+        self.bus.mem_read(addr)
     }
 
     fn mem_write(&mut self, addr: u16, data: u8) {
-        self.memory[addr as usize] = data;
+        self.bus.mem_write(addr, data);
     }
 }
 
 impl CPU {
+    pub fn new_with_rom(rom: Rom) -> Self {
+        CPU {
+            register_a: 0,
+            register_x: 0,
+            register_y: 0,
+            register_stack: 0xFD,
+            status: CPUFlags::from_bits_truncate(0b100100),
+            program_counter: 0,
+            bus: Bus::new(rom),
+        }
+    }
+
     pub fn new() -> Self {
         CPU {
             register_a: 0,
             register_x: 0,
             register_y: 0,
-            register_stack: 0xFF,
+            register_stack: 0xFD,
             status: CPUFlags::from_bits_truncate(0b100100),
             program_counter: 0,
-            memory: [0u8; 0xFFFF],
+            bus: Bus::new(Rom::new(&([].to_vec())).expect("Invalid rom")),
         }
     }
 
@@ -105,8 +119,11 @@ impl CPU {
     }
 
     pub fn load(&mut self, program: Vec<u8>) {
-        let start = 0x0600;
-        self.memory[start..(start + program.len())].copy_from_slice(&program[..]);
+        // let start = 0x0600;
+        let start = 0x0000;
+        for i in 0..(program.len() as u16) {
+            self.mem_write(start + i, program[i as usize]);
+        }
         self.mem_write_u16(0xFFFC, start as u16);
     }
 
@@ -772,8 +789,8 @@ mod test {
     #[test]
     fn test_jmp_indirect() {
         let mut cpu = CPU::new();
-        cpu.memory[0x120] = 0xFC;
-        cpu.memory[0x121] = 0xBA;
+        cpu.bus.mem_write(0x120, 0xFC);
+        cpu.bus.mem_write(0x121, 0xBA);
         // jmp ($0120)
         // pc == (0xBAFC + 1)
         cpu.load_and_run(vec![0x6C, 0x20, 0x01]);
@@ -783,9 +800,9 @@ mod test {
     #[test]
     fn test_jmp_indirect_bug() {
         let mut cpu = CPU::new();
-        cpu.memory[0x200] = 0xDE;
-        cpu.memory[0x2ff] = 0xFC;
-        cpu.memory[0x300] = 0xBA;
+        cpu.bus.mem_write(0x200, 0xDE);
+        cpu.bus.mem_write(0x2ff, 0xFC);
+        cpu.bus.mem_write(0x300, 0xBA);
         // jmp ($2ff)
         // pc == (0xDEFC + 1)
         cpu.load_and_run(vec![0x6C, 0xff, 0x02]);
